@@ -86,6 +86,8 @@ class ICalendarEvent(object):
         return self.start
     def getEnd(self):
         return self.end
+    def isAllDay(self):
+        return type(self.start) is datetime.date and type(self.end) is datetime.date
     def occursOn(self, date):
         dateIso = date.isoformat()
         nextDateIso = (date + datetime.timedelta(days=1)).isoformat()

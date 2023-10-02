@@ -3,10 +3,9 @@ if __name__ != '__main__':
     print('Must run as script')
     sys.exit(1)
 
-from datetime import datetime, timedelta
 from waveshare_epd import epd7in5_V2
 from PIL import Image,ImageDraw,ImageFont
-import time, sched, os, sys, calendar, calendar_loader, json
+import time, sched, os, sys, calendar, calendar_loader, json, datetime
 
 fontsdirname = 'fonts'
 calendar_list_filename = 'calendars.json'
@@ -31,6 +30,7 @@ event_sources = [calendar_loader.ICalendarCacheWrapper(calendar, cache_dir=calen
 
 majorFontName = os.path.join(fontbasedir, 'SFAlienEncountersSolid.ttf')
 minorFontName = os.path.join(fontbasedir, 'Audiowide-Regular.ttf')
+minimumFontName = os.path.join(fontbasedir, 'RictyDiminished-Bold.ttf')
 
 def boundsToSize(bounds):
     return [(bounds[2]-bounds[0]), (bounds[3]-bounds[1])]
@@ -69,6 +69,9 @@ dateContentsBufferPct = 0.1 # 10% of the size of the box
 dateEventBoxMinimumSize = 3 # 3px of box
 dateEventBoxMaximumSize = 20 # 10px of box
 dateEventBoxMinimumSeparation = 2 # 2px of separation
+dateEventTestString = 'a few words'
+dateEventMinimumHeight = 12
+dateEventMaximumHeight = 24
 
 # colors
 foreground = 0
@@ -128,11 +131,9 @@ def drawCalendarGrid(draw):
         if y < weeksInMonth:
           draw.line([(calendarGridBounds[0], gridY + dateHeaderHeight), (calendarGridBounds[2], gridY + dateHeaderHeight)], fill=foreground)
 
-def drawDateContents(draw, x, y, dateNumber, highlightHeader=None, eventCount=None, currentMonth=None):
+def drawDateContents(draw, x, y, dateNumber, highlightHeader=None, events=None, currentMonth=None):
   if highlightHeader is None:
       highlightHeader = False
-  if eventCount is None:
-      eventCount = 0
   if currentMonth is None:
       currentMonth = True
   upLeft = [x*calendarGridDaySize[0]+calendarGridBounds[0], y*calendarGridDaySize[1]+calendarGridBounds[1]]
@@ -142,22 +143,39 @@ def drawDateContents(draw, x, y, dateNumber, highlightHeader=None, eventCount=No
       draw.rectangle((upLeft[0]+dateHeaderWidth, upLeft[1], upLeft[0]+(calendarGridDaySize[0]), upLeft[1]+dateHeaderHeight), fill=foreground)
   if not currentMonth:
       draw.line([(upLeft[0], upLeft[1]+dateHeaderHeight), (upLeft[0]+calendarGridDaySize[0], upLeft[1]+calendarGridDaySize[1])], fill=foreground)
-  if eventCount is not None and eventCount > 0 and currentMonth:
+  if events is not None and len(events) > 0 and currentMonth:
+      eventCount = len(events)
+      allDayCount = len([event for event in events if event.isAllDay()])
       # We want a number of boxes equal to the number of events, unless we can't fit at least 3px of box and 1px of separation;
       #  then we just output a filled rectangle with a number.
-      if dateEventsSize[0] < eventCount*dateEventBoxMinimumSize + (eventCount-1)*dateEventBoxMinimumSeparation:
+      if dateEventsSize[1] < eventCount*dateEventMinimumHeight + (eventCount-1)*dateEventBoxMinimumSeparation:
           draw.rectangle([(upLeft[0]+dateContentsBounds[0], upLeft[1]+dateContentsBounds[1]), (upLeft[0]+dateContentsBounds[2], upLeft[1]+dateContentsBounds[3])], fill=background, outline=foreground, width=2)
           draw.text([dateEventsBottomMiddle[0]+upLeft[0], dateEventsBottomMiddle[1]+upLeft[1]], str(eventCount), font=dateContentsFont, anchor='mb', fill=foreground)
       else:
           # If we can fit it, we'll use 2xminimum separation
           separation = dateEventBoxMinimumSeparation
-          if dateEventsSize[0] >= eventCount*dateEventBoxMinimumSize + (eventCount-1)*2*separation:
+          if dateEventsSize[0] >= eventCount*dateEventMinimumHeight + (eventCount-1)*2*separation:
               separation *= 2
-          boxSize = min(int( (dateEventsSize[0]-(separation*eventCount-1))/eventCount), dateEventBoxMaximumSize)
-          for xc in range(eventCount):
-              eUpLeft = (upLeft[0]+dateContentsBounds[0]+xc*(boxSize+separation), upLeft[1]+dateContentsBounds[1])
-              eBotRight = (upLeft[0]+dateContentsBounds[0]+xc*(boxSize+separation)+boxSize, upLeft[1]+dateContentsBounds[3])
-              draw.rectangle([eUpLeft, eBotRight], fill=foreground)
+          boxSize = min(max(int( (dateEventsSize[1]-(separation*eventCount-1))/eventCount), dateEventMinimumHeight), dateEventMaximumHeight)
+          dateEventFont = ImageFont.truetype(minimumFontName, getMaximumFontSize(minimumFontName, [dateEventsSize[0], boxSize-4], dateEventTestString))
+          for yc in range(eventCount):
+              eUpLeft = (upLeft[0]+dateContentsBounds[0], upLeft[1]+dateContentsBounds[1]+yc*(boxSize+separation))
+              eBotRight = (upLeft[0]+dateContentsBounds[2], upLeft[1]+dateContentsBounds[1]+yc*(boxSize+separation)+boxSize)
+              draw.rectangle([eUpLeft, eBotRight], outline=foreground, fill=background)
+              draw.text([eUpLeft[0]+2, eUpLeft[1]+2], getFittedText(draw, dateEventFont, events[yc].getSummary(), dateEventsSize[0]-4), font=dateEventFont, anchor='lt', fill=foreground)
+
+def getFittedText(draw, imageFont, text, widthToFit):
+    textCopy = text
+    testLength = draw.textlength(textCopy, imageFont)
+    while testLength > widthToFit:
+        if len(textCopy) == 0:
+            raise Exception('Can\'t fit text {:s}'.format(text))
+        if testLength > widthToFit*2:
+            textCopy = textCopy[:int(len(textCopy)/2)]
+        else:
+            textCopy = textCopy[:-1]
+        testLength = draw.textlength(textCopy, imageFont)
+    return textCopy
 
 def drawCalendarHeader(draw, date):
   upLeft = headerBounds[0:2]
@@ -180,46 +198,47 @@ def drawDayGrid(draw):
 
 
 def drawCalendar():
-    epd.init()
+    print('Formatting calendar')
+    preCal = datetime.datetime.now()
+    timeImage = Image.new('1', (epd.width, epd.height), 1)
+    draw = ImageDraw.Draw(timeImage)
+
+    now = datetime.datetime.now(calendar_loader.currenttz())
+    curDate = now.date()
+    cal = calendar.Calendar(6)
+    datesBeingDrawn = [date for date in cal.itermonthdates(curDate.year, curDate.month)]
+    earliestDateDrawn = datesBeingDrawn[0]
+    events = []
+    for wrappedCalendar in event_sources:
+        events += wrappedCalendar.get_events_after(earliestDateDrawn)
+    events.sort(key=lambda event: event.getStart().isoformat())
+
+    drawCalendarHeader(draw, curDate)
+    drawDayHeader(draw)
+
+    drawCalendarGrid(draw)
+    for idx, dateObj in enumerate(datesBeingDrawn):
+        thisDayEvents = [event for event in events if event.occursOn(dateObj)]
+        gridLocation = [(dateObj.weekday()+1)%7, int(idx/7)]
+        drawDateContents(draw, gridLocation[0], gridLocation[1],
+                  dateObj.day, highlightHeader=curDate == dateObj,
+                  currentMonth = curDate.month == dateObj.month,
+                  events=thisDayEvents)
+    
+    todayEvents = [event for event in events if event.occursOn(curDate)]
+    drawDayGrid(draw)
+    print('Ouputting to display')
+    preDraw = datetime.datetime.now()
     try:
-        timeImage = Image.new('1', (epd.width, epd.height), 1)
-        draw = ImageDraw.Draw(timeImage)
 
-        now = datetime.now(calendar_loader.currenttz())
-        curDate = now.date()
-        cal = calendar.Calendar(6)
-        datesBeingDrawn = [date for date in cal.itermonthdates(curDate.year, curDate.month)]
-        earliestDateDrawn = datesBeingDrawn[0]
-        events = []
-        for wrappedCalendar in event_sources:
-            events += wrappedCalendar.get_events_after(earliestDateDrawn)
-        events.sort(key=lambda event: event.getStart().isoformat())
-
-        drawCalendarHeader(draw, curDate)
-        drawDayHeader(draw)
-
-        drawCalendarGrid(draw)
-        for idx, dateObj in enumerate(datesBeingDrawn):
-            thisDayEvents = [event for event in events if event.occursOn(dateObj)]
-            print('Events on {date:s}:\n{events:s}'.format(date=dateObj.strftime(calendar_loader.dateformat),
-                events='\n'.join('*  {} ({} - {})'.format(
-                    event.getSummary(),
-                    event.getStart().strftime(calendar_loader.timeformat),
-                    event.getEnd().strftime(calendar_loader.timeformat)
-                    ) for event in thisDayEvents))
-            )
-            gridLocation = [(dateObj.weekday()+1)%7, int(idx/7)]
-            drawDateContents(draw, gridLocation[0], gridLocation[1],
-                      dateObj.day, highlightHeader=curDate == dateObj,
-                      currentMonth = curDate.month == dateObj.month,
-                      eventCount=len(thisDayEvents))
-        
-        todayEvents = [event for event in events if event.occursOn(curDate)]
-        drawDayGrid(draw)
-
+        epd.init()
         epd.Clear()
         epd.display(epd.getbuffer(timeImage))
     finally:
         epd.sleep()
+    after = datetime.datetime.now()
+    formatTime = preDraw - preCal
+    outputTime = after - preDraw
+    print('Complete; Formatting {:.2f}s, drawing {:.2f}s'.format(formatTime.total_seconds(), outputTime.total_seconds()))
 
 drawCalendar()
