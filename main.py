@@ -1,11 +1,18 @@
 #!/usr/bin/env python3
+from waveshare_epd import epd7in5_V2
+from PIL import Image,ImageDraw,ImageFont
+import time, sched, os, sys, calendar, calendar_loader, json, datetime, argparse
+
 if __name__ != '__main__':
     print('Must run as script')
     sys.exit(1)
 
-from waveshare_epd import epd7in5_V2
-from PIL import Image,ImageDraw,ImageFont
-import time, sched, os, sys, calendar, calendar_loader, json, datetime
+parser = argparse.ArgumentParser()
+parser.add_argument('--debug-set-date', help='Fake what day it is; input in yyyy-mm-ddThh:mm:ss format')
+
+args = parser.parse_args()
+
+fake_time = None if args.debug_set_date is None else datetime.datetime.strptime(args.debug_set_date, '%Y-%m-%dT%H:%M:%S')
 
 fontsdirname = 'fonts'
 calendar_list_filename = 'calendars.json'
@@ -56,7 +63,6 @@ def getMaximumFontSize(font, maxSize, testStr):
           # Escape from infinite loop; if even 1 won't fit, we can't print into this space
           raise Exception('Can\'t fit font {font:s} into bounding box {bb:g}'.format(font=font, bb=maxSize))
 
-
 ## Constraints on drawing
 edgeBuffer = 2 # pixel buffer from the edges of the e-paper
 interItemBuffer = 3 # pixel buffer between components
@@ -65,12 +71,12 @@ headerYSize = 0.1
 dowYSize = 0.03
 dateHeaderHeightPct = 0.15 # 15% of the height of the box
 dateHeaderWidthPct = 0.3  # two-digit dates should be 30% of the width of the box
-dateContentsBufferPct = 0.1 # 10% of the size of the box
+dateContentsBufferPct = 0.05 # 10% of the size of the box
 dateEventBoxMinimumSize = 3 # 3px of box
 dateEventBoxMaximumSize = 20 # 10px of box
 dateEventBoxMinimumSeparation = 2 # 2px of separation
 dateEventTestString = 'a few words'
-dateEventMinimumHeight = 12
+dateEventMinimumHeight = 10
 dateEventMaximumHeight = 24
 
 # colors
@@ -79,11 +85,10 @@ background = 1
 
 # Overall setup
 headerBounds = [edgeBuffer, edgeBuffer, int(epd.width*calendarXSize)-edgeBuffer-interItemBuffer, int(epd.height*headerYSize)]
-dayHeaderBounds = [headerBounds[2]+interItemBuffer, edgeBuffer, epd.width-edgeBuffer, headerBounds[3]]
 calendarDoWBounds = [headerBounds[0], headerBounds[3]+interItemBuffer, headerBounds[2], headerBounds[3]+interItemBuffer+int(epd.height*dowYSize)]
 calendarGridBounds = [edgeBuffer, calendarDoWBounds[3]+interItemBuffer, headerBounds[2], epd.height-edgeBuffer]
-dayBounds = [calendarGridBounds[2]+interItemBuffer, dayHeaderBounds[3]+interItemBuffer, epd.width-edgeBuffer, epd.height-edgeBuffer]
-daySize = [dayBounds[2] - dayBounds[0], dayBounds[3] - dayBounds[0]]
+dayBounds = [calendarGridBounds[2]+interItemBuffer, edgeBuffer, epd.width-edgeBuffer, epd.height-edgeBuffer]
+daySize = [dayBounds[2] - dayBounds[0], dayBounds[3] - dayBounds[1]]
 
 ## Calendar specific settings
 # 7 days in a week, maximum 5 weeks in a month
@@ -158,11 +163,14 @@ def drawDateContents(draw, x, y, dateNumber, highlightHeader=None, events=None, 
               separation *= 2
           boxSize = min(max(int( (dateEventsSize[1]-(separation*eventCount-1))/eventCount), dateEventMinimumHeight), dateEventMaximumHeight)
           dateEventFont = ImageFont.truetype(minimumFontName, getMaximumFontSize(minimumFontName, [dateEventsSize[0], boxSize-4], dateEventTestString))
+          fontBBox = dateEventFont.getbbox(dateEventTestString)
+          boxSize = min(boxSize, fontBBox[3]-fontBBox[1]+4)
           for yc in range(eventCount):
               eUpLeft = (upLeft[0]+dateContentsBounds[0], upLeft[1]+dateContentsBounds[1]+yc*(boxSize+separation))
               eBotRight = (upLeft[0]+dateContentsBounds[2], upLeft[1]+dateContentsBounds[1]+yc*(boxSize+separation)+boxSize)
               draw.rectangle([eUpLeft, eBotRight], outline=foreground, fill=background)
-              draw.text([eUpLeft[0]+2, eUpLeft[1]+2], getFittedText(draw, dateEventFont, events[yc].getSummary(), dateEventsSize[0]-4), font=dateEventFont, anchor='lt', fill=foreground)
+              draw.text([eUpLeft[0]+2, eUpLeft[1]+2], getFittedText(draw, dateEventFont, events[yc].getSummary(), dateEventsSize[0]-4),
+                         font=dateEventFont, anchor='lt', fill=foreground)
 
 def getFittedText(draw, imageFont, text, widthToFit):
     textCopy = text
@@ -185,17 +193,72 @@ def drawCalendarHeader(draw, date):
   draw.text((upLeft[0], upLeft[1]), dateStr, font=font, anchor='lt', fill=foreground)
 
 ## Day events specific settings
-# fill things in here
-def drawDayHeader(draw):
-  title = 'Today'
-  upLeft = dayHeaderBounds[0:2]
-  headerSize = [(dayHeaderBounds[2] - dayHeaderBounds[0])-4, (dayHeaderBounds[3] - dayHeaderBounds[1])-4]
-  font = ImageFont.truetype(majorFontName, getMaximumFontSize(majorFontName, headerSize, title))
-  draw.text((upLeft[0], upLeft[1]), title, font=font, anchor='lt', fill=foreground)
+majorBlockHours = 4
+minorBlockHours = 1
+minorBlockLengthPct = 0.1 # 10% of the margins
+minorBlockLength = daySize[0]*minorBlockLengthPct/2
+allDayEventHeight = 16
+timeFontHeight = 8
 
-def drawDayGrid(draw):
-  draw.rectangle([(dayBounds[0], dayBounds[1]), (dayBounds[2], dayBounds[3])], width=2, fill=background, outline=foreground)
+def drawDayGrid(draw, allDayEvents=None):
+  if allDayEvents is None:
+      allDayEvents = []
+  numAllDayEvents = len(allDayEvents)
+  reservedAllDaySpace = (allDayEventHeight*numAllDayEvents)+interItemBuffer
+  modDayBounds = [dayBounds[0], dayBounds[1]+reservedAllDaySpace, dayBounds[2], dayBounds[3]]
+  modDaySize = [daySize[0], modDayBounds[3]-modDayBounds[1]]
+  # intentionally left as a float, each minute is going to be subpixels
+  # but in case we need to coerce something that's not aligned to a 15 minute boundary
+  pixels_per_minute = modDaySize[1]/float(24*60.0)
+  # All day events
+  if numAllDayEvents > 0:
+      font = ImageFont.truetype(minimumFontName, getMaximumFontSize(minimumFontName, [daySize[0]-4, allDayEventHeight-4], dateEventTestString))
+      for idx, event in enumerate(sorted(allDayEvents, key=lambda event: event.getSummary())):
+          height = dayBounds[1]+idx*allDayEventHeight
+          draw.rectangle([ (dayBounds[0], height), (dayBounds[2], height+allDayEventHeight) ],  fill=background, outline=foreground)
+          draw.text([dayBounds[0]+2, height+2], getFittedText(draw, font, event.getSummary(), daySize[0]-4), font=font, anchor='lt', fill=foreground)
+  draw.rectangle([(modDayBounds[0], modDayBounds[1]), (modDayBounds[2], modDayBounds[3])], width=2, fill=background, outline=foreground)
+  # Minor hour marks
+  for hblock in range(24):
+      height = modDayBounds[1]+int(pixels_per_minute*hblock*60)
+      # left side
+      draw.line([ (modDayBounds[0], height), (modDayBounds[0]+minorBlockLength, height) ], fill=foreground)
+      # right side
+      draw.line([ (modDayBounds[2]-minorBlockLength, height), (modDayBounds[2], height) ], fill=foreground)
+  # Major hour marks
+  hourFont = ImageFont.truetype(minimumFontName, getMaximumFontSize(minimumFontName, [daySize[0]-4, timeFontHeight], '12Noon'))
+  for hblock in range(int(24/majorBlockHours)):
+      height = modDayBounds[1]+int(pixels_per_minute*hblock*majorBlockHours*60)
+      draw.line([ (modDayBounds[0], height), (modDayBounds[2], height) ], fill=foreground)
+      if hblock != 0:
+        time = datetime.time(hour=hblock*4)
+        formatted = time.strftime('%I%p') if time.hour != 12 else 'Noon'
+        if formatted[0] == '0':
+            formatted = formatted[1:]
+        textbb = hourFont.getbbox(formatted, anchor='lm')
+        draw.rectangle([ (modDayBounds[0]+2, height+textbb[1]), (modDayBounds[0]+6+textbb[2], height+textbb[3])], fill=background)
+        draw.text([modDayBounds[0]+4, height], formatted, font=hourFont, anchor='lm', fill=foreground)
 
+class DayEventBox(object):
+    def __init__(self, event, pixels_per_minute, currentDay):
+        self.event = event
+        self.startInDay = event.getStart().date() == currentDay
+        self.endInDay = event.getStart().date() == currentDay
+        self.startHeight = 0 if not self.startInDay else int((event.getStart() - event.getStart().date()).total_seconds()/60*pixels_per_minute)
+        self.endHeight = daySize[1] if not self.endInDay else int((event.getEnd() - event.getEnd().date()).total_seconds()/60*pixels_per_minute)
+    def getEvent(self):
+        return self.event
+    def getStartHeight(self):
+        return self.startHeight
+    def getEndHeight(self):
+        return self.endHeight
+    def startsInDay(self):
+        return self.startInDay
+    def endsInDay(self):
+        return self.endInDay
+
+def drawDayEvents(draw, events, currentDay):
+    pass
 
 def drawCalendar():
     print('Formatting calendar')
@@ -204,6 +267,11 @@ def drawCalendar():
     draw = ImageDraw.Draw(timeImage)
 
     now = datetime.datetime.now(calendar_loader.currenttz())
+    if fake_time is not None:
+        print('Using fake time {:s} instead of actual current time {:s}'.format(
+            fake_time.strftime(calendar_loader.timeformat), now.strftime(calendar_loader.timeformat)
+        ))
+        now = fake_time
     curDate = now.date()
     cal = calendar.Calendar(6)
     datesBeingDrawn = [date for date in cal.itermonthdates(curDate.year, curDate.month)]
@@ -214,7 +282,6 @@ def drawCalendar():
     events.sort(key=lambda event: event.getStart().isoformat())
 
     drawCalendarHeader(draw, curDate)
-    drawDayHeader(draw)
 
     drawCalendarGrid(draw)
     for idx, dateObj in enumerate(datesBeingDrawn):
@@ -226,11 +293,11 @@ def drawCalendar():
                   events=thisDayEvents)
     
     todayEvents = [event for event in events if event.occursOn(curDate)]
-    drawDayGrid(draw)
+    drawDayGrid(draw, allDayEvents=[event for event in todayEvents if event.isAllDay()])
+    drawDayEvents(draw, [event for event in todayEvents if not event.isAllDay()], curDate)
     print('Ouputting to display')
     preDraw = datetime.datetime.now()
     try:
-
         epd.init()
         epd.Clear()
         epd.display(epd.getbuffer(timeImage))
