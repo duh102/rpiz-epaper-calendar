@@ -199,10 +199,13 @@ minorBlockLengthPct = 0.1 # 10% of the margins
 minorBlockLength = daySize[0]*minorBlockLengthPct/2
 allDayEventHeight = 16
 timeFontHeight = 8
+dayEventFontHeight = 10
+widthDayEventsPct = 1-(minorBlockLengthPct*1.5)
+widthDayEvents = daySize[0]*widthDayEventsPct
 
-def drawDayGrid(draw, allDayEvents=None):
-  if allDayEvents is None:
-      allDayEvents = []
+def drawDayGrid(draw, todayEvents, currentDay, currentTime):
+  allDayEvents = [event for event in todayEvents if event.isAllDay()]
+  duringDayEvents = [event for event in todayEvents if not event.isAllDay()]
   numAllDayEvents = len(allDayEvents)
   reservedAllDaySpace = (allDayEventHeight*numAllDayEvents)+interItemBuffer
   modDayBounds = [dayBounds[0], dayBounds[1]+reservedAllDaySpace, dayBounds[2], dayBounds[3]]
@@ -238,16 +241,29 @@ def drawDayGrid(draw, allDayEvents=None):
         textbb = hourFont.getbbox(formatted, anchor='lm')
         draw.rectangle([ (modDayBounds[0]+2, height+textbb[1]), (modDayBounds[0]+6+textbb[2], height+textbb[3])], fill=background)
         draw.text([modDayBounds[0]+4, height], formatted, font=hourFont, anchor='lm', fill=foreground)
+  drawDayEvents(draw, duringDayEvents, modDayBounds[1], currentDay, currentTime, pixels_per_minute)
 
 class DayEventBox(object):
     def __init__(self, event, pixels_per_minute, currentDay):
         self.event = event
         self.startInDay = event.getStart().date() == currentDay
         self.endInDay = event.getStart().date() == currentDay
-        self.startHeight = 0 if not self.startInDay else int((event.getStart() - event.getStart().date()).total_seconds()/60*pixels_per_minute)
-        self.endHeight = daySize[1] if not self.endInDay else int((event.getEnd() - event.getEnd().date()).total_seconds()/60*pixels_per_minute)
+        self.startHeight = 0 if not self.startInDay else int((event.getStart() - event.getStart().replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()/60*pixels_per_minute)
+        self.endHeight = daySize[1] if not self.endInDay else int((event.getEnd() - event.getEnd().replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()/60*pixels_per_minute)
     def getEvent(self):
         return self.event
+    def getTimeSummary(self):
+        tFmt = '%I:%m%p'
+        noMinTFmt = '%I%p'
+        start = self.event.getStart()
+        end = self.event.getEnd()
+        startStr = start.strftime(tFmt) if start.minute != 0 else start.strftime(noMinTFmt)
+        endStr = end.strftime(tFmt) if end.minute != 0 else end.strftime(noMinTFmt)
+        if startStr[0] == '0':
+            startStr = startStr[1:]
+        if endStr[0] == '0':
+            endStr = endStr[1:]
+        return '{:s}-{:s} {:s}'.format(startStr, endStr, self.event.getSummary())
     def getStartHeight(self):
         return self.startHeight
     def getEndHeight(self):
@@ -256,9 +272,50 @@ class DayEventBox(object):
         return self.startInDay
     def endsInDay(self):
         return self.endInDay
+    def conflicts(self, other):
+        return (   (self.getStartHeight() > other.getStartHeight() and self.getStartHeight() < other.getEndHeight() and self.getEndHeight() > other.getEndHeight())
+                or (self.getStartHeight() < other.getStartHeight() and self.getEndHeight() > other.getStartHeight() and self.getEndHeight() < other.getEndHeight())
+                or (self.getStartHeight() > other.getStartHeight() and self.getEndHeight() < other.getEndHeight())
+                or (self.getStartHeight() < other.getStartHeight() and self.getEndHeight() > other.getEndHeight())
+                and self != other )
 
-def drawDayEvents(draw, events, currentDay):
-    pass
+def drawDayEvents(draw, events, midnight_y, currentDay, currentTime, pixels_per_minute):
+    eventBoxes = [DayEventBox(event, pixels_per_minute, currentDay) for event in events]
+    upLeft = [dayBounds[0]+int(daySize[0]/2-(widthDayEvents/2)), midnight_y]
+    conflictingBoxes = [box for box in eventBoxes if any(box.conflicts(b2) for b2 in eventBoxes)]
+    nonConflictBoxes = [box for box in eventBoxes if box not in conflictingBoxes]
+    font = ImageFont.truetype(minimumFontName, getMaximumFontSize(minimumFontName, [daySize[0]-4, dayEventFontHeight], dateEventTestString))
+    if len(conflictingBoxes) > 0:
+      conflictGroups = []
+      tempConflictingBoxes = [box for box in conflictingBoxes]
+      for box in conflictingBoxes:
+        if box not in tempConflictingBoxes:
+            continue
+        thisGroup = [b for b in conflictingBoxes if box.conflicts(b)]
+        if box not in thisGroup:
+            thisGroup.append(box)
+        for b in thisGroup:
+            tempConflictingBoxes.remove(b)
+        conflictGroups.append(thisGroup)
+      for conflictGroup in conflictGroups:
+          numEvents = len(conflictGroup)
+          boxWidth = (widthDayEvents-((numEvents-1)*dateEventBoxMinimumSeparation))/numEvents
+          for idx, event in enumerate(sorted(conflictGroup, key=lambda event: event.getStartHeight())):
+            eUpLeft = (upLeft[0]+(idx*(boxWidth+dateEventBoxMinimumSeparation)), event.getStartHeight()+midnight_y)
+            eDownRight = (upLeft[0]+(idx*(boxWidth+dateEventBoxMinimumSeparation))+boxWidth, event.getEndHeight()+midnight_y)
+            draw.rectangle([ eUpLeft, eDownRight ], fill=background, outline=foreground)
+            draw.text([eUpLeft[0]+2, eUpLeft[1]+2], getFittedText(draw, font, event.getTimeSummary(), boxWidth-4),
+                         font=font, anchor='lt', fill=foreground)
+    if len(nonConflictBoxes) > 0:
+      boxWidth = widthDayEvents
+      for event in nonConflictBoxes:
+          eUpLeft = (upLeft[0], event.getStartHeight()+midnight_y)
+          eDownRight = (upLeft[0]+boxWidth, event.getEndHeight()+midnight_y)
+          draw.rectangle([ eUpLeft, eDownRight ], fill=background, outline=foreground)
+          draw.text([eUpLeft[0]+2, eUpLeft[1]+2], getFittedText(draw, font, event.getTimeSummary(), boxWidth-4),
+                     font=font, anchor='lt', fill=foreground)
+    currentTimeHeight = int((currentTime-currentTime.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()/60*pixels_per_minute)+midnight_y
+    draw.line([(dayBounds[0], currentTimeHeight), (dayBounds[2], currentTimeHeight)], fill=foreground)
 
 def drawCalendar():
     print('Formatting calendar')
@@ -293,8 +350,7 @@ def drawCalendar():
                   events=thisDayEvents)
     
     todayEvents = [event for event in events if event.occursOn(curDate)]
-    drawDayGrid(draw, allDayEvents=[event for event in todayEvents if event.isAllDay()])
-    drawDayEvents(draw, [event for event in todayEvents if not event.isAllDay()], curDate)
+    drawDayGrid(draw, todayEvents, curDate, now)
     print('Ouputting to display')
     preDraw = datetime.datetime.now()
     try:
